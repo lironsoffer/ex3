@@ -16,7 +16,7 @@ MOVE_behaviour_penalty = 1.05
 CALIBRATE_behaviour_penalty = 0.8
 MOVE_safe_percentage_to_effect_h = 0.74
 
-LOG = False
+LOG = True
 
 def convert_dictionary_to_string_keys(d):
     newd = {}
@@ -81,8 +81,14 @@ class SpaceshipController:
         """This is the heuristic. It evaluates the action"""
 
         h=self.find_closest_distances_to_targets(state)
-        h-=len(self.closed_targets)
+        if self.open_targets:
+            targets_factor = (len(self.open_targets)/len(self.all_targets))
+        else:
+            targets_factor=0
+        h*=targets_factor
+        # h-=len(self.closed_targets)
         # h-=self.count_working_and_calibrated(state)
+
         self.update_instruments_needed_and_useless_ships(state)
         useless_ships = self.useless_ships
         safe_percentage = 1
@@ -108,7 +114,7 @@ class SpaceshipController:
             if safe_percentage < MOVE_safe_percentage_to_effect_h:
                 h+=100*(1-safe_percentage)
             behaviour_penalty = MOVE_behaviour_penalty #+ (1-safe_percentage)
-        #print("action = ", action, "->", safe_percentage,"->", h * behaviour_penalty)
+        if LOG: print("action = ", action, "->", safe_percentage,"->", h * behaviour_penalty)
         return (h * behaviour_penalty)
 
     def update_instruments_needed_and_useless_ships(self, state):
@@ -142,14 +148,18 @@ class SpaceshipController:
                     ship_pos = state.positions[ship]
                     if inst_needed == weapon_on_ship:
                         if on and calibrated:
-                            straight_line = self.is_target_in_straight_line(ship_pos,target.pos)
-                            obstacles = self.is_obstacles_on_the_way(state,ship,target.pos)
-                            distance_from_target = axis_distance(ship_pos,target.pos)
-                            distance_from_target+= 4 if straight_line and obstacles else 0
+                            # straight_line = self.is_target_in_straight_line(ship_pos,target.pos)
+                            distance_from_target = distance(ship_pos,target.pos)
+                            if not distance_from_target:
+                                obstacle = self.is_obstacles_on_the_way(state, ship, target.pos)
+                                if obstacle:
+                                    distance_from_target = distance(ship_pos,obstacle)
+                                    distance_from_target += distance(obstacle,target.pos)
+                            # distance_from_target+= 4 if distance_from_target==0 and obstacle else 0
                             distance_dict[ship] = distance_from_target
                         else:
-                            distance_from_target = axis_distance(ship_pos, self.calibration_targets[inst_needed])
-                            distance_from_target+= axis_distance(self.calibration_targets[inst_needed], target.pos)
+                            distance_from_target = distance(ship_pos, self.calibration_targets[inst_needed])
+                            distance_from_target+= distance(self.calibration_targets[inst_needed], target.pos)
                             distance_dict[ship] = distance_from_target + 1 if on else 0
 
             if distance_dict:
@@ -333,13 +343,13 @@ class SpaceshipController:
                 (k, l, m) = obstacle
                 if x != a and y == b == l and z == c == m:
                     if ((a < k) and (k < x)) or ((x < k) and (k < a)):
-                        return True
+                        return (k,l,m)
                 elif x == a == k and y != b and z == c == m:
                     if ((b < l) and (l < y)) or ((y < l) and (l < b)):
-                        return True
+                        return (k,l,m)
                 elif x == a == k and y == b == l and z != c:
                     if ((c < m) and (m < z)) or ((z < m) and (m < c)):
-                        return True
+                        return (k,l,m)
         return False
 
     def get_neighbors(self, pos):
@@ -532,10 +542,8 @@ def make_set_targets_from_dict(targets):
     return targets_set
 
 #_______________________________________________________________
-
-
-#_______________________________________________________________
-
+def distance(A,B):
+    return two_dim_distance(A,B)
 
 def axis_distance(ship_pos, target_pos):
     (xA, yA, zA) = ship_pos
@@ -554,6 +562,12 @@ def axis_distance(ship_pos, target_pos):
     if (yA == yB) and (zA == zB):
         return 0
     return distance
+
+def two_dim_distance(ship_pos, target_pos):
+    (a,b,c) = (abs(target_pos[0]-ship_pos[0]),abs(target_pos[1]-ship_pos[1]),abs(target_pos[2]-ship_pos[2]))
+    distance = a + b + c - max(a,b,c)
+    return distance
+# _______________________________________________________________
 
 # if __name__ == '__main__':
 #     start = time.time()
