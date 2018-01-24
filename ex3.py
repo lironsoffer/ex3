@@ -1,12 +1,22 @@
 import time
+from threading import Timer
 import random
 from collections import namedtuple
-import our_ex1_utils_for_ex3
-import search
+# import search
 
-ids = ["000000000", "111111111"]
+ids = ["307915462", "111111111"]
 Tuple_state = namedtuple('Tuple_state', 'ships, positions, lasers, working_instruments, calibrated_instruments, reward')
 Target = namedtuple('Target', 'pos, req_instrument')
+
+LASER_TURNING_ON_CHANCES = 0.4
+CHOSEN_ACTION_MIN_SAFETY = 0.7 # When lower makes the agent take more risk
+# USE_behaviour_penalty = 1
+TURN_ON_behaviour_penalty = 0.85
+MOVE_behaviour_penalty = 1.05
+CALIBRATE_behaviour_penalty = 0.8
+MOVE_safe_percentage_to_effect_h = 0.74
+
+LOG = False
 
 def convert_dictionary_to_string_keys(d):
     newd = {}
@@ -20,6 +30,9 @@ def convert_dictionary_from_string_keys(d):
         newd[tuple(eval(k))] = d[k]
     return newd
 
+def end_run():
+    return None
+
 class SpaceshipController:
     "This class is a controller for a spaceship problem."
 
@@ -27,7 +40,8 @@ class SpaceshipController:
         """Initialize controller for given the initial setting.
         This method MUST terminate within the specified timeout."""
         self.timeout = problem[9]
-        #todo: make timeout
+        # self.timer = Timer(self.timeout, end_run)
+        # self.timer.start()  # after self.timeout seconds, returns None (illegal action)
         self.max_steps=problem[8]
         self.problem = problem
         self.saved_initial = initial_state
@@ -50,26 +64,54 @@ class SpaceshipController:
         self.open_targets = make_set_targets_from_dict(problem[5])
         self.closed_targets = set()
 
-        self.last_state = Tuple_state(*initial_state)
+        state = Tuple_state(*initial_state)
+        self.last_state = state
         self.last_action = None
 
-        self.action_seq = []
-        self.active_problem = (None,None)
-        self.obstacles = self.get_obstacles(Tuple_state(*initial_state))
+        self.obstacles = self.get_obstacles(state)
+        self.update_instruments_needed_and_useless_ships(state)
 
         print('COMPLETE init ')
+        print("Req Reward = {}".format(self.dim*20))
 
     def reward(self, state):
         pass
 
     def h(self, state, action):
         """This is the heuristic. It evaluates the action"""
-        # print(state)
-        # state = Tuple_state(*state)
 
         h=self.find_closest_distances_to_targets(state)
-        h-=len(self.closed_targets)+self.count_working_and_calibrated(state)
+        h-=len(self.closed_targets)
+        # h-=self.count_working_and_calibrated(state)
+        self.update_instruments_needed_and_useless_ships(state)
+        useless_ships = self.useless_ships
+        safe_percentage = 1
+        behaviour_penalty = 1
+        if action[0]=="use":
+            return -10000
+        elif action[0] == "turn_on":
+            if useless_ships:
+                if action[1] in useless_ships:
+                    return 100000
+            behaviour_penalty = TURN_ON_behaviour_penalty
+        elif action[0] == "calibrate":
+            if useless_ships:
+                if action[1] in useless_ships:
+                    return 100000
+            behaviour_penalty = CALIBRATE_behaviour_penalty
+        elif action[0] == "move":
+            (command,ship,pos1,pos2) = action
+            if useless_ships:
+                if ship in useless_ships:
+                    return 100000
+            safe_percentage = (self.neighbor_safe_percentage(state, pos2,pos1))
+            if safe_percentage < MOVE_safe_percentage_to_effect_h:
+                h+=100*(1-safe_percentage)
+            behaviour_penalty = MOVE_behaviour_penalty #+ (1-safe_percentage)
+        #print("action = ", action, "->", safe_percentage,"->", h * behaviour_penalty)
+        return (h * behaviour_penalty)
 
+    def update_instruments_needed_and_useless_ships(self, state):
         instruments_needed = []  # amount of needed ships. if ship is not needed ---> append to useless ships
         for target in self.open_targets:
             weapon = target.req_instrument
@@ -85,30 +127,8 @@ class SpaceshipController:
             if useless:
                 useless_ships.append(ship)
 
-        safe_percentage = 1
-        behaviour_penalty = 1
-        if action[0]=="use":
-            return -10000
-        elif action[0] == "turn_on":
-            if useless_ships:
-                if action[1] in useless_ships:
-                    return 100000
-            behaviour_penalty = 0.85
-        elif action[0] == "calibrate":
-            if useless_ships:
-                if action[1] in useless_ships:
-                    return 100000
-            behaviour_penalty = 0.85
-        elif action[0] == "move":
-            if useless_ships:
-                if action[1] in useless_ships:
-                    return 100000
-            safe_percentage = (self.neighbor_safe_percentage(state, action[2]))
-            if safe_percentage < 0.6:
-                h+=100*(1-safe_percentage)
-            behaviour_penalty = 1.05 + (1-safe_percentage)
-        #print("action = ", action, "->", safe_percentage,"->", h * behaviour_penalty)
-        return (h * behaviour_penalty)
+        self.instruments_needed = instruments_needed
+        self.useless_ships = useless_ships
 
     def find_closest_distances_to_targets(self,state):
         count = 0
@@ -133,13 +153,10 @@ class SpaceshipController:
                             distance_dict[ship] = distance_from_target + 1 if on else 0
 
             if distance_dict:
-                # print("closest")
                 closest = min(distance_dict, key=distance_dict.get)
                 count += distance_dict[closest]
                 if not state.working_instruments[closest]==inst_needed:
                     count += 1
-            else:
-                count=1000
         return count
 
     def count_working_and_calibrated(self,state):
@@ -166,7 +183,6 @@ class SpaceshipController:
 
             turn_on_actions = self.get_turn_on_actions_for_ship(state, spaceship)
             if turn_on_actions:
-                # print("turn_on_actions=",turn_on_actions)
                 actions.extend(turn_on_actions)
 
             move_actions = self.get_move_actions_for_ship(state, spaceship)
@@ -198,6 +214,8 @@ class SpaceshipController:
     def get_turn_on_actions_for_ship(self,state,ship):
         actions = []
         for weapon in self.instruments_on_ships[ship]:
+            # if weapon != state.working_instruments[ship]:
+            #     actions.append(("turn_on", ship, weapon))
             if weapon==state.working_instruments[ship]:
                 continue
             target_pos = self.calibration_targets[weapon]
@@ -206,6 +224,20 @@ class SpaceshipController:
             if condition3 and condition4:
                 actions.append(("turn_on", ship, weapon))
         return actions
+
+    def get_safe_turn_on_action(self,state):
+        chances = {}
+        for ship in state.ships:
+            for weapon in self.instruments_on_ships[ship]:
+                if weapon != state.working_instruments[ship]:
+                    laser_on_chances = self.check_laser_on_chances(state,state.positions[ship])
+                    if laser_on_chances<0.6:
+                        return ("turn_on", ship, weapon)
+                    chances[("turn_on", ship, weapon)] = laser_on_chances
+        if chances:
+            return min(chances, key=chances.get)
+        else:
+            return None
 
     def get_move_actions_for_ship(self, state, ship):
         move_actions = []
@@ -225,19 +257,20 @@ class SpaceshipController:
         obstacles = r_targets + c_targets + positions
         return obstacles
 
-    def neighbor_safe_percentage(self,state, neighbor):
+    def neighbor_safe_percentage(self,state, neighbor, pos1):
         #todo: consider lasers
         percentage = 1
 
         percentage -= 0.8 * self.check_laser_on_chances(state,neighbor)
 
-        neighbors = set(self.get_neighbors(neighbor))
-        illegal_neighbors = set(self.get_all_neighbors(neighbor)).difference(neighbors)
+        illegal = lambda a,b,c: (a<0) or (a>=self.dim) or (b<0) or (b>=self.dim) or (c<0) or (c>=self.dim)
+        neighbors = self.get_all_neighbors(neighbor,pos1)
+        illegal_neighbors = [neighbor for neighbor in neighbors if illegal(*neighbor)]
         if illegal_neighbors:
             percentage -= 0.1 * len(illegal_neighbors)
 
         obstacles = set(self.obstacles)
-        obstacles_neighbors = neighbors.intersection(obstacles)
+        obstacles_neighbors = obstacles.intersection(neighbors)
         if obstacles_neighbors:
             percentage -= 0.1 * len(obstacles_neighbors)
 
@@ -258,18 +291,26 @@ class SpaceshipController:
                 if state.lasers[laser]:
                     count+= 1
                 else:
-                    count+= 0.3
+                    count+= LASER_TURNING_ON_CHANCES
         return count
 
-    def get_all_neighbors(self,pos):
-        neighbors = []
+    def get_all_neighbors(self,pos,last_pos):
         (x, y, z) = pos
-        neighbors.append((x + 1, y, z))
-        neighbors.append((x - 1, y, z))
-        neighbors.append((x, y + 1, z))
-        neighbors.append((x, y - 1, z))
-        neighbors.append((x, y, z + 1))
-        neighbors.append((x, y, z - 1))
+        direction = (x-last_pos[0],y-last_pos[1],z-last_pos[2])
+        if direction[0]:
+            neighbors = [(x,y+1,z),(x,y+1,z+1),(x,y+1,z-1),
+                     (x,y-1,z),(x,y-1,z+1),(x,y-1,z-1),
+                     (x,y,z+1),(x,y,z-1)]
+        elif direction[1]:
+            neighbors = [(x + 1, y, z), (x + 1, y, z + 1), (x + 1, y, z - 1),
+                         (x - 1, y, z), (x - 1, y, z + 1), (x - 1, y, z - 1),
+                         (x, y, z + 1), (x, y, z - 1)]
+        elif direction[2]:
+            neighbors = [(x + 1, y, z), (x + 1, y + 1, z), (x + 1, y - 1, z),
+                         (x - 1, y, z), (x - 1, y + 1, z), (x - 1, y - 1, z),
+                         (x, y + 1, z), (x, y - 1, z)]
+        else:
+            neighbors = []
         return neighbors
 
     def is_target_in_straight_line(self, spaceship_pos, target_pos):
@@ -322,12 +363,10 @@ class SpaceshipController:
         """Choose next action for driverlog controller given the current state.
         Action should be returned in the format described previous parts of the project"""
         state = Tuple_state(*state)
-        self.print_state(state)
 
         if self.steps>=self.max_steps:
+            # self.timer.cancel()
             return None
-        else:
-            self.steps+=1
 
         if self.last_action:
             self.update_world(state)
@@ -336,15 +375,39 @@ class SpaceshipController:
         f = self.h
         actions = self.actions(state)
         h_actions_dict = {}
+        safe_percentage_dict = {}
         for action in actions:
+            safe_percentage = 1
+            #todo: consider changing for other actions
             h_action = f(state,action)
-            h_actions_dict[tuple(action)] = h_action
+            if action[0]=="move":
+                (command,ship,pos1,pos2) = action
+                safe_percentage = self.neighbor_safe_percentage(state, pos2, pos1)
+            safe_percentage_dict[action] = safe_percentage
+            if LOG: ("{} %={}, h={}".format(action,safe_percentage,h_action))
+            if safe_percentage!=0:
+                h_action*=1/safe_percentage
+                h_actions_dict[tuple(action)] = h_action
 
-        min_value = min(h_actions_dict.values())
-        min_keys = [k for k in h_actions_dict if h_actions_dict[k] == min_value]
-        chosen_action = random.choice(min_keys)
+        if not h_actions_dict:
+            min_value = 0
+            chosen_action = self.get_safe_turn_on_action(state)
+            if not chosen_action:
+                print("NO SAFE ACTIONS!! returning reset")
+                chosen_action = ("reset",)
+        else:
+            min_value = min(h_actions_dict.values())
+            min_keys = [k for k in h_actions_dict if h_actions_dict[k] == min_value]
+            chosen_action = random.choice(min_keys)
 
-        print("---Chosen action: ", chosen_action, "=>", min_value,"---")
+            steps_factor = self.steps/self.max_steps
+            not_safe = safe_percentage_dict[chosen_action] < (CHOSEN_ACTION_MIN_SAFETY * steps_factor)
+            if not_safe and min_value>0:
+                if LOG: print("---Chosen action: {} => {} not safe enough---".format(chosen_action,min_value))
+                chosen_action_try = self.get_safe_turn_on_action(state)
+                if chosen_action_try:
+                    chosen_action = chosen_action_try
+        if LOG: print("---Chosen action: ", chosen_action, "=>", min_value,"---")
         self.last_state = state
         self.last_action = chosen_action
         return chosen_action
@@ -360,28 +423,28 @@ class SpaceshipController:
         #     return None
 
     def update_world(self, state):
-        show_changes = True
-
         #check what changed and update reward
         reward = state.reward-self.reward
-        if show_changes:
-            print("Reward: ", reward)
+        self.steps += 1
+        if LOG:
+            print("New Reward: ", reward)
+            print("Total Reward: ", state.reward)
             print("Steps: ", self.steps)
+
         #todo: check other options for reward
         exploded = set()
         if reward==-100:
-            pass
-        #todo
+            self.open_targets.update(self.closed_targets)
+            self.closed_targets.clear()
         elif reward < 0:
             exploded = self.get_newly_exploded_ships(state.ships)
             self.exploded_ships.update(exploded)
-            if show_changes and exploded:
-                print("Exploded: ", exploded)
         elif reward == 50:
             self.update_targets()
         self.reward=state.reward
 
         self.obstacles = self.get_obstacles(state)
+        self.update_instruments_needed_and_useless_ships(state)
 
         if self.last_action[0]=="move":
             # self.positions = state.positions #update the positions of the ships
@@ -389,7 +452,7 @@ class SpaceshipController:
             if ship not in exploded:
                 pos2 = tuple(pos2)
                 real_pos2 = tuple(state.positions[ship])
-                if real_pos2 != pos2:
+                if LOG and (real_pos2 != pos2):
                     print("******Ship ", ship, "in pos", real_pos2, "instead of", pos2,"******")
 
     # def find_ship_and_target(self, ships):
@@ -429,6 +492,7 @@ class SpaceshipController:
 
     def update_targets(self):
         target = Target(self.last_action[3], self.last_action[2])
+        if LOG: print("{} is down!".format(target))
         self.closed_targets.add(target)
         self.open_targets.remove(target)
 
@@ -468,85 +532,10 @@ def make_set_targets_from_dict(targets):
     return targets_set
 
 #_______________________________________________________________
-def timeout_exec(func, args=(), kwargs={}, timeout_duration=10, default=None):
-    """This function will spawn a thread and run the given function
-    using the args, kwargs and return the given default value if the
-    timeout_duration is exceeded.
-    """
-    import threading
-    class InterruptableThread(threading.Thread):
-        def __init__(self):
-            threading.Thread.__init__(self)
-            self.result = default
 
-        def run(self):
-            try:
-                self.result = func(*args, **kwargs)
-            except Exception as e:
-                self.result = (-3, -3, e)
 
-    it = InterruptableThread()
-    it.start()
-    it.join(timeout_duration)
-    if it.isAlive():
-        return default
-    else:
-        return it.result
-
-def check_spaceship_problem(p, search_method, timeout):
-    """ Constructs a problem using ex1.create_poisonserver_problem,
-    and solves it using the given search_method with the given timeout.
-    Returns a tuple of (solution length, solution time, solution)
-    (-2, -2, None) means there was a timeout
-    (-3, -3, ERR) means there was some error ERR during search"""
-
-    t1 = time.time()
-    s = timeout_exec(search_method, args=[p], timeout_duration=timeout)
-    t2 = time.time()
-
-    if isinstance(s, search.Node):
-        solve = s
-        solution = list(map(lambda n: n.action, solve.path()))[1:]
-        return (len(solution), t2 - t1, solution)
-    elif s is None:
-        return (-2, -2, None)
-    else:
-        return s
-
-def solve_problems(problems,ship,target,goal):
-    solved = 0
-    print("Solving ex1")
-    try:
-        p = our_ex1_utils_for_ex3.create_spaceship_problem(problems,ship,target,goal)
-    except Exception as e:
-        print("Error creating problem: ", e)
-        return None
-    timeout = 60
-    result = check_spaceship_problem(p, (lambda p: search.best_first_graph_search(p, p.h)), timeout)
-    # print("GBFS ", result)
-    if result[2] != None:
-        if result[0] != -3:
-            solved += 1
-    print("GBFS Solved ", solved)
-    if solved:
-        return result[2]
-    else:
-        print("Couldn't solve problem->Returned reset")
-        return [("reset",)]
-    #todo: what to do?
 #_______________________________________________________________
-def check_problem(problem, initial_state):
-    controller = SpaceshipController(problem, initial_state)
-    # print("got state", state)
-    action = controller.choose_next_action(initial_state)
-    print("returning action", action)
-    return action
-    # try:
-    #     action = controller.choose_next_action(initial_state)
-    #     print("returning action", action)
-    #     return action
-    # except:
-    #     print("Error check_solution")
+
 
 def axis_distance(ship_pos, target_pos):
     (xA, yA, zA) = ship_pos
