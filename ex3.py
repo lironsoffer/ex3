@@ -297,7 +297,7 @@ class SpaceshipController:
         lasers = ((-1, b, c), (a, -1, c), (a, b, -1))
         count = 0
         for laser in lasers:
-            if laser in state.lasers:
+            if laser in state.lasers.keys():
                 if state.lasers[laser]:
                     count+= 1
                 else:
