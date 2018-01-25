@@ -2,7 +2,6 @@ import time
 from threading import Timer
 import random
 from collections import namedtuple
-# import search
 
 ids = ["307915462", "204858823"]
 Tuple_state = namedtuple('Tuple_state', 'ships, positions, lasers, working_instruments, calibrated_instruments, reward')
@@ -164,27 +163,24 @@ class SpaceshipController:
 
     def find_closest_distance_from_ship_to_target(self, state, ship, target):
         inst_needed = target.req_instrument
-        distance_dict = {}
-        for weapon_on_ship in self.instruments_on_ships[ship]:
-            on = state.working_instruments[ship] == inst_needed
-            calibrated = state.calibrated_instruments[ship]
-            ship_pos = state.positions[ship]
-            if inst_needed == weapon_on_ship:
-                if on and calibrated:
-                    # straight_line = self.is_target_in_straight_line(ship_pos,target.pos)
-                    distance_from_target = distance(ship_pos, target.pos)
-                    if distance_from_target==0:
-                        obstacle = self.is_obstacles_on_the_way(state, ship, target.pos)
-                        if obstacle:
-                            distance, newP = calculate_projection_distance(ship_pos, obstacle)
-                            distance_from_target = distance + distance(newP, target.pos)
-                    # distance_from_target+= 4 if distance_from_target==0 and obstacle else 0
-                    distance_dict[target] = distance_from_target
-                else:
-                    distance, newP = calculate_projection_distance(ship_pos, self.calibration_targets[inst_needed])
-                    distance_from_target = distance(ship_pos, newP)
-                    distance_from_target += distance(newP, target.pos)
-                    distance_dict[target] = distance_from_target + 1 if on else 0
+        on = state.working_instruments[ship] == inst_needed
+        calibrated = state.calibrated_instruments[ship]
+        ship_pos = state.positions[ship]
+
+        if on and calibrated:
+            distance_from_target = distance(ship_pos, target.pos)
+            if distance_from_target==0:
+                obstacle = self.is_obstacles_on_the_way(state, ship, target.pos)
+                if obstacle:
+                    d, newP = calculate_projection_distance(ship_pos, obstacle)
+                    distance_from_target = d + distance(newP, target.pos)
+            # distance_from_target+= 4 if distance_from_target==0 and obstacle else 0
+        else:
+            d, newP = calculate_projection_distance(ship_pos, self.calibration_targets[inst_needed])
+            distance_from_target = distance(ship_pos, newP)
+            distance_from_target += distance(newP, target.pos)
+            distance_from_target += distance_from_target + 1 if on else 0
+        return distance_from_target
 
     def count_working_and_calibrated(self,state):
         add = lambda k,v: 1 if v else 0
@@ -272,8 +268,8 @@ class SpaceshipController:
         neighbors = self.get_neighbors(ship_pos)
         # obstacles = self.get_obstacles(state)
         for neighbor in neighbors:
-            # if (neighbor not in self.obstacles) and neighbor!=self.last_moves[ship]:
-            if (neighbor not in self.obstacles):
+            if (neighbor not in self.obstacles) and neighbor!=self.last_moves[ship]:
+            # if (neighbor not in self.obstacles):
                 move_actions.append(("move", ship, ship_pos, neighbor))
         return move_actions
 
