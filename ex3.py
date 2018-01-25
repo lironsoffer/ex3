@@ -4,11 +4,11 @@ import random
 from collections import namedtuple
 # import search
 
-ids = ["307915462", "111111111"]
+ids = ["307915462", "204858823"]
 Tuple_state = namedtuple('Tuple_state', 'ships, positions, lasers, working_instruments, calibrated_instruments, reward')
 Target = namedtuple('Target', 'pos, req_instrument')
 
-LASER_TURNING_ON_CHANCES = 0.4
+LASER_TURNING_ON_CHANCES = 0.3
 CHOSEN_ACTION_MIN_SAFETY = 0.7 # When lower makes the agent take more risk
 # USE_behaviour_penalty = 1
 TURN_ON_behaviour_penalty = 0.85
@@ -33,6 +33,12 @@ def convert_dictionary_from_string_keys(d):
 def end_run():
     return None
 
+def create_last_moves(ships):
+    dic={}
+    for ship in ships:
+        dic[ship]=None
+    return dic
+
 class SpaceshipController:
     "This class is a controller for a spaceship problem."
 
@@ -50,7 +56,7 @@ class SpaceshipController:
         self.steps = 0
 
         self.dim = problem[0]
-        # self.ships = problem[1]
+        self.ships = problem[1]
         self.all_instruments = problem[2]
         self.instruments_on_ships = problem[3]
         self.calibration_targets = problem[4]
@@ -69,7 +75,9 @@ class SpaceshipController:
         self.last_action = None
 
         self.obstacles = self.get_obstacles(state)
+        self.less_obstacles = self.get_less_obstacles()
         self.update_instruments_needed_and_useless_ships(state)
+        self.last_moves = create_last_moves(self.ships)
 
         print('COMPLETE init ')
         print("Req Reward = {}".format(self.dim*20))
@@ -79,8 +87,11 @@ class SpaceshipController:
 
     def h(self, state, action):
         """This is the heuristic. It evaluates the action"""
+        if action==("reset",):
+            return 0
 
-        h=self.find_closest_distances_to_targets(state)
+        action_ship = action[0]
+        h=self.find_closest_distance_to_targets(state, action_ship)
         if self.open_targets:
             targets_factor = (len(self.open_targets)/len(self.all_targets))
         else:
@@ -136,38 +147,44 @@ class SpaceshipController:
         self.instruments_needed = instruments_needed
         self.useless_ships = useless_ships
 
-    def find_closest_distances_to_targets(self,state):
+    def find_closest_distance_to_targets(self, state, action_ship):
         count = 0
+        distance_dict = {}
+        min_distance = self.dim * 3
         for target in self.open_targets:  # distance from the closest ship to this target
             inst_needed = target.req_instrument
-            distance_dict = {}
-            for ship in state.ships:
-                for weapon_on_ship in self.instruments_on_ships[ship]:
-                    on = state.working_instruments[ship]==inst_needed
-                    calibrated = state.calibrated_instruments[ship]
-                    ship_pos = state.positions[ship]
-                    if inst_needed == weapon_on_ship:
-                        if on and calibrated:
-                            # straight_line = self.is_target_in_straight_line(ship_pos,target.pos)
-                            distance_from_target = distance(ship_pos,target.pos)
-                            if not distance_from_target:
-                                obstacle = self.is_obstacles_on_the_way(state, ship, target.pos)
-                                if obstacle:
-                                    distance_from_target = distance(ship_pos,obstacle)
-                                    distance_from_target += distance(obstacle,target.pos)
-                            # distance_from_target+= 4 if distance_from_target==0 and obstacle else 0
-                            distance_dict[ship] = distance_from_target
-                        else:
-                            distance_from_target = distance(ship_pos, self.calibration_targets[inst_needed])
-                            distance_from_target+= distance(self.calibration_targets[inst_needed], target.pos)
-                            distance_dict[ship] = distance_from_target + 1 if on else 0
+            if action_ship in state.ships and inst_needed in self.instruments_on_ships[action_ship]:
+                min_distance = self.find_closest_distance_from_ship_to_target(state,action_ship,target)
+                distance_dict[target] = min_distance
 
-            if distance_dict:
-                closest = min(distance_dict, key=distance_dict.get)
-                count += distance_dict[closest]
-                if not state.working_instruments[closest]==inst_needed:
-                    count += 1
-        return count
+        if distance_dict:
+            closest = min(distance_dict, key=distance_dict.get)
+            min_distance = distance_dict[closest]
+        return min_distance
+
+    def find_closest_distance_from_ship_to_target(self, state, ship, target):
+        inst_needed = target.req_instrument
+        distance_dict = {}
+        for weapon_on_ship in self.instruments_on_ships[ship]:
+            on = state.working_instruments[ship] == inst_needed
+            calibrated = state.calibrated_instruments[ship]
+            ship_pos = state.positions[ship]
+            if inst_needed == weapon_on_ship:
+                if on and calibrated:
+                    # straight_line = self.is_target_in_straight_line(ship_pos,target.pos)
+                    distance_from_target = distance(ship_pos, target.pos)
+                    if distance_from_target==0:
+                        obstacle = self.is_obstacles_on_the_way(state, ship, target.pos)
+                        if obstacle:
+                            distance, newP = calculate_projection_distance(ship_pos, obstacle)
+                            distance_from_target = distance + distance(newP, target.pos)
+                    # distance_from_target+= 4 if distance_from_target==0 and obstacle else 0
+                    distance_dict[target] = distance_from_target
+                else:
+                    distance, newP = calculate_projection_distance(ship_pos, self.calibration_targets[inst_needed])
+                    distance_from_target = distance(ship_pos, newP)
+                    distance_from_target += distance(newP, target.pos)
+                    distance_dict[target] = distance_from_target + 1 if on else 0
 
     def count_working_and_calibrated(self,state):
         add = lambda k,v: 1 if v else 0
@@ -255,6 +272,7 @@ class SpaceshipController:
         neighbors = self.get_neighbors(ship_pos)
         # obstacles = self.get_obstacles(state)
         for neighbor in neighbors:
+            # if (neighbor not in self.obstacles) and neighbor!=self.last_moves[ship]:
             if (neighbor not in self.obstacles):
                 move_actions.append(("move", ship, ship_pos, neighbor))
         return move_actions
@@ -265,6 +283,13 @@ class SpaceshipController:
         positions = [tuple(v) for v in state.positions.values()]
 
         obstacles = r_targets + c_targets + positions
+        return obstacles
+
+    def get_less_obstacles(self):
+        r_targets = list(self.all_real_targets_positions)
+        c_targets = list(self.calibration_targets.values())
+
+        obstacles = r_targets + c_targets
         return obstacles
 
     def neighbor_safe_percentage(self,state, neighbor, pos1):
@@ -567,33 +592,15 @@ def two_dim_distance(ship_pos, target_pos):
     (a,b,c) = (abs(target_pos[0]-ship_pos[0]),abs(target_pos[1]-ship_pos[1]),abs(target_pos[2]-ship_pos[2]))
     distance = a + b + c - max(a,b,c)
     return distance
+
+def calculate_projection_distance(self, p1, p2):
+    # reutrns a tuple of (smallest_distance, new P)
+    x1, y1, z1 = p1
+    x2, y2, z2 = p2
+
+    distance, newP = min((abs(x1 - x2) + abs(y1 - y2), (x2, y2, z1)),
+                         (abs(x1 - x2) + abs(z1 - z2), (x2, y1, z2)),
+                         (abs(y1 - y2) + abs(z1 - z2), (x1, y2, z2))
+                         )
+    return (distance, newP)
 # _______________________________________________________________
-
-# if __name__ == '__main__':
-#     start = time.time()
-#     problem = (
-#         5, #0 Dimensions
-#         ["Sidonia", "Enterprise"], #1 Ships
-#         ("rangefinder", "thermal_camera"), #2 Instruments
-#         {"Sidonia": ("rangefinder", ), "Enterprise": ("thermal_camera", "rangefinder")}, #3  Instruments on ships
-#         {"rangefinder": (0, 3, 2), "thermal_camera": (1, 4, 2)}, #4 Calibration targets
-#         {(1, 4, 1): ("thermal_camera", "rangefinder"), (4, 3, 4): ("thermal_camera", "rangefinder")}, #5 Targets
-#         {"Sidonia": (4, 1, 1), "Enterprise": (3, 0, 3)}, #6 Positions
-#         ((-1, 2, 2), (4, 4, -1)), #7 Lasers
-#         20, #8 Steps
-#         180 #9 Time
-#     )
-# # try:
-#     calibrated = {x: None for x in problem[1]}
-#     calibrated_as_output = {}
-#     for ship, instrument in calibrated.items():
-#         if instrument is not None:
-#             calibrated_as_output[ship] = True
-#     check_solution(problem, (problem[1], problem[6], {x: False for x in problem[7]}, {x: None for x in problem[1]}, calibrated_as_output, 0))
-#
-#     # except Exception as e:
-#         # print(e)
-#     finish = time.time()
-#     print("Overall time elapsed:", finish-start)
-
-#_____________________________________________________________
